@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-and-upload:
+    name: Build and Upload
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: drop
+            asset_name: drop-linux-amd64
+          - os: macos-latest
+            artifact_name: drop
+            asset_name: drop-macos-amd64
+          - os: windows-latest
+            artifact_name: drop.exe
+            asset_name: drop-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Rename binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: mv target/release/${{ matrix.artifact_name }} target/release/${{ matrix.asset_name }}
+
+      - name: Rename binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: Rename-Item -Path "target\release\${{ matrix.artifact_name }}" -NewName "${{ matrix.asset_name }}"
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/${{ matrix.asset_name }}
