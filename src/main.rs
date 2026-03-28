@@ -9,6 +9,8 @@ use axum::{
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::ProgressBar;
 use local_ip_address::local_ip;
+use mdns_sd::{ServiceDaemon, ServiceInfo};
+use std::collections::HashMap;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -28,7 +30,7 @@ enum Method {
 #[derive(Parser)]
 struct Cli {
     /// Port number (1-65535)
-    #[arg(short, long, default_value_t = 6969)]
+    #[arg(short, long, default_value_t = 1844)]
     port: u16,
 
     #[command(subcommand)]
@@ -37,9 +39,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Send { file_path: PathBuf },
+    Send {
+        file_path: PathBuf,
+    },
 
     Receive,
+
+    Join {
+        /// Optional: The file to upload if the host is in 'Receive' mode
+        file_path: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -58,12 +67,14 @@ async fn main() {
                 .route("/", get(get_upload))
                 .route("/upload", post(post_upload))
                 .layer(DefaultBodyLimit::disable())
-                .layer(Extension(token));
+                .layer(Extension(token.clone()));
 
             let link = format!("http://{ip_with_port}");
             println!();
             qr2term::print_qr(&link).unwrap();
             println!("\nScan the QR or go to {}", &link);
+
+            spawn_mdns_advertiser(cli.port, "receive", token);
 
             let listener = tokio::net::TcpListener::bind(&ip_with_port).await.unwrap();
             axum::serve(listener, app)
@@ -89,12 +100,14 @@ async fn main() {
             let app = Router::new()
                 .route("/download", get(download))
                 .layer(Extension(Arc::new(file_path)))
-                .layer(Extension(token));
+                .layer(Extension(token.clone()));
 
             let link = format!("http://{ip_with_port}/download");
 
             qr2term::print_qr(&link).unwrap();
             println!("\nScan the QR or go to {}", &link);
+
+            spawn_mdns_advertiser(cli.port, "send", token);
 
             let listener = tokio::net::TcpListener::bind(&ip_with_port).await.unwrap();
             axum::serve(listener, app)
@@ -102,7 +115,145 @@ async fn main() {
                 .await
                 .unwrap();
         }
+
+        Commands::Join { file_path } => {
+            println!("[ INFO ] : Searching for RustShare on the local network...");
+
+            let mdns = mdns_sd::ServiceDaemon::new().unwrap();
+            let service_type = "_dropshare._tcp.local.";
+            let receiver = mdns.browse(service_type).unwrap();
+
+            while let Ok(event) = receiver.recv_async().await {
+                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+                    let ip = info
+                        .get_addresses()
+                        .iter()
+                        .find(|addr| addr.is_ipv4())
+                        .unwrap();
+                    let port = info.get_port();
+
+                    let properties = info.get_properties();
+                    let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
+
+                    println!(
+                        "\n[ SUCCESS ] : Found a host in '{}' mode at {}",
+                        mode,
+                        info.get_fullname()
+                    );
+
+                    let client = reqwest::Client::new();
+
+                    if mode == "send" {
+                        let url = format!("http://{}:{}/download", ip, port);
+                        println!("[ INFO ] : Automatically downloading from {}...", url);
+
+                        let mut res = client.get(&url).send().await.unwrap();
+                        let total_size = res.content_length().unwrap_or(0);
+
+                        // Try to extract the original filename from the headers, fallback to "downloaded_file"
+                        let mut file_name = String::from("downloaded_file");
+                        if let Some(cd) = res.headers().get(reqwest::header::CONTENT_DISPOSITION) {
+                            let cd_str = cd.to_str().unwrap_or("");
+                            if let Some(idx) = cd_str.find("filename=\"") {
+                                let start = idx + 10;
+                                if let Some(end) = cd_str[start..].find("\"") {
+                                    file_name = cd_str[start..start + end].to_string();
+                                }
+                            }
+                        }
+
+                        let pb = ProgressBar::new(total_size);
+                        pb.set_message(format!("Downloading \"{}\"...", file_name));
+
+                        let mut file = fs::File::create(&file_name).await.unwrap();
+
+                        // Stream the download to disk chunk by chunk
+                        while let Some(chunk) = res.chunk().await.unwrap() {
+                            file.write_all(&chunk).await.unwrap();
+                            pb.inc(chunk.len() as u64);
+                        }
+                        pb.finish_with_message(format!("[ SUCCESS ] : Saved as {}", file_name));
+                    } else if mode == "receive" {
+                        let url = format!("http://{}:{}/upload", ip, port);
+
+                        if let Some(path) = file_path {
+                            println!(
+                                "[ INFO ] : Automatically uploading {} to {}...",
+                                path.display(),
+                                url
+                            );
+
+                            let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+
+                            // Open the file and stream it directly into the multipart form
+                            let file = fs::File::open(&path).await.unwrap();
+                            let part = reqwest::multipart::Part::stream(file).file_name(file_name);
+
+                            let form = reqwest::multipart::Form::new().part("uploadedFile", part);
+
+                            let res = client.post(&url).multipart(form).send().await.unwrap();
+
+                            if res.status().is_success() {
+                                println!("[ SUCCESS ] : Upload complete!");
+                            } else {
+                                println!(
+                                    "[ ERROR ] : Upload failed. Server responded with: {}",
+                                    res.status()
+                                );
+                            }
+                        } else {
+                            println!(
+                                "[ ERROR ] : The host is waiting to receive a file, but you didn't provide one."
+                            );
+                            println!(
+                                "Run the command again like this: cargo run -- join ./your_file.txt"
+                            );
+                        }
+                    }
+
+                    // We completed our task, so stop listening and exit
+                    break;
+                }
+            }
+        }
     }
+}
+
+fn spawn_mdns_advertiser(port: u16, mode: &'static str, token: CancellationToken) {
+    tokio::spawn(async move {
+        let mdns = ServiceDaemon::new().unwrap();
+
+        let service_type = "_dropshare._tcp.local.";
+        let instance_name = format!("DropShare-{}", mode);
+        let host_name = format!("{}.local.", instance_name);
+
+        let mut properties = HashMap::new();
+        properties.insert("mode".to_string(), mode.to_string());
+
+        let my_ip = local_ip_address::local_ip().unwrap().to_string();
+
+        let service_info = ServiceInfo::new(
+            service_type,
+            &instance_name,
+            &host_name,
+            my_ip,
+            port,
+            Some(properties),
+        )
+        .unwrap();
+
+        // Start broadcasting
+        mdns.register(service_info).unwrap();
+        println!(
+            "[ mDNS ] : Broadcasting as '{}' on the local network",
+            instance_name
+        );
+
+        token.cancelled().await;
+
+        let full_name = format!("{}.{}", instance_name, service_type);
+        mdns.unregister(&full_name).unwrap();
+    });
 }
 
 async fn shutdown_signal(token: CancellationToken) {
@@ -124,10 +275,19 @@ async fn shutdown_signal(token: CancellationToken) {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = ctrl_c => {
+            println!("\n[ INFO ] : Ctrl+C received, shutting down...");
+            token.cancel();
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        },
+        _ = terminate => {
+            println!("\n[ INFO ] : Terminate signal received, shutting down...");
+            token.cancel();
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        },
         _ = token.cancelled() => {
-            println!("Shutting down server...");
+            println!("\n[ INFO ] : Transfer complete, shutting down server...");
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
 }
@@ -279,11 +439,15 @@ async fn post_upload(
 
         let original_file_name = field.file_name().unwrap_or("file").to_string();
         let mut file_name = original_file_name.clone();
-        let mut total_size: u64 = 0;
 
         let bar = ProgressBar::new_spinner();
+        bar.set_style(
+                    indicatif::ProgressStyle::default_spinner()
+                        .template("{spinner:.green} [{elapsed_precise}] Receiving \"{msg}\" — {bytes} ({bytes_per_sec})")
+                        .unwrap(),
+                );
+        bar.set_message(file_name.clone());
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
-        bar.set_message(format!("Receiving \"{}\"...", file_name));
 
         let mut counter = 1;
         let (base_name, ext) = match original_file_name.rsplit_once('.') {
@@ -312,7 +476,6 @@ async fn post_upload(
         loop {
             match field.chunk().await {
                 Ok(Some(chunk)) => {
-                    total_size += chunk.len() as u64;
                     if let Err(e) = file.write_all(&chunk).await {
                         bar.abandon_with_message(format!(
                             "[ ERROR ] : Failed to write to disk: {}",
@@ -322,11 +485,7 @@ async fn post_upload(
                         break;
                     }
 
-                    bar.set_message(format!(
-                        "Receiving \"{}\" — {}",
-                        file_name,
-                        format_size(total_size)
-                    ));
+                    bar.inc(chunk.len() as u64);
                 }
                 Ok(None) => {
                     break;
