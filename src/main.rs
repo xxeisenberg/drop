@@ -163,6 +163,7 @@ async fn main() {
                         }
 
                         let pb = ProgressBar::new(total_size);
+                        println!("[ INFO ] : Incoming file size: {}", format_size(total_size));
                         pb.set_message(format!("Downloading \"{}\"...", file_name));
 
                         let mut file = fs::File::create(&file_name).await.unwrap();
@@ -546,6 +547,10 @@ async fn stream_file(path: Arc<PathBuf>) -> impl IntoResponse {
         Ok(meta) => meta.len(),
         Err(_) => 0,
     };
+    println!(
+        "[ INFO ] : Serving file of size {}",
+        format_size(content_length)
+    );
 
     let pb = ProgressBar::new(content_length);
     let wrapped_file = pb.wrap_async_read(file);
