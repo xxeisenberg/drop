@@ -1,9 +1,10 @@
 use crate::utils::format_size;
+use anyhow::Context;
 use axum::{
     body::Body,
     extract::Multipart,
     http::{header, Response, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response as AxumResponse},
     Extension,
 };
 use indicatif::ProgressBar;
@@ -17,16 +18,37 @@ use tokio::{
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
+pub struct AppError(anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> AxumResponse {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Error: {:#}", self.0),
+        )
+            .into_response()
+    }
+}
+
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
+}
+
 pub async fn download(
     Extension(file_path): Extension<Arc<PathBuf>>,
     Extension(token): Extension<CancellationToken>,
-) -> impl IntoResponse {
-    let res = stream_file(file_path).await;
+) -> Result<impl IntoResponse, AppError> {
+    let res = stream_file(file_path).await?;
     token.cancel();
-    res
+    Ok(res)
 }
 
-pub async fn get_upload() -> impl IntoResponse {
+pub async fn get_upload() -> Result<impl IntoResponse, AppError> {
     let html = "<html lang=\"en\">
     <head>
         <meta charset=\"UTF-8\">
@@ -55,24 +77,23 @@ pub async fn get_upload() -> impl IntoResponse {
         </div>
     </body>
     </html>";
-    Response::builder()
+
+    let response = Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
         .body(Body::from(html))
-        .unwrap()
+        .context("Failed to build HTML response for get_upload")?;
+
+    Ok(response)
 }
 
 pub async fn post_upload(
     Extension(token): Extension<CancellationToken>,
     mut multipart: Multipart,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     loop {
-        let mut field = match multipart.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("[ ERROR ] : Failed to read multipart field: {}", e);
-                return (StatusCode::BAD_REQUEST, "Malformed upload data").into_response();
-            }
+        let mut field = match multipart.next_field().await.context("Failed to read multipart field")? {
+            Some(f) => f,
+            None => break,
         };
 
         let original_file_name = field.file_name().unwrap_or("file").to_string();
@@ -84,7 +105,7 @@ pub async fn post_upload(
                 .template(
                     "{spinner:.green} [{elapsed_precise}] Receiving \"{msg}\" — {bytes} ({bytes_per_sec})",
                 )
-                .unwrap(),
+                .context("Failed to set progress bar template")?,
         );
         bar.set_message(file_name.clone());
         bar.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -107,7 +128,7 @@ pub async fn post_upload(
                     "[ ERROR ] : Could not create file on disk: {}",
                     e
                 ));
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
+                return Err(anyhow::anyhow!("Disk error: {}", e).into());
             }
         };
 
@@ -141,11 +162,12 @@ pub async fn post_upload(
         if !upload_successful {
             drop(file);
             let _ = fs::remove_file(&file_name).await;
-            return (StatusCode::BAD_REQUEST, "Upload interrupted").into_response();
+            return Err(anyhow::anyhow!("Upload interrupted").into());
         }
 
         bar.finish_with_message(format!("\"{}\" received successfully", file_name));
     }
+
     token.cancel();
 
     let html = "<html lang=\"en\">
@@ -160,27 +182,29 @@ pub async fn post_upload(
     </body>
     </html>";
 
-    Response::builder()
+    let response = Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
         .body(Body::from(html))
-        .unwrap()
+        .context("Failed to build HTML response for post_upload")?;
+
+    Ok(response)
 }
 
-async fn stream_file(path: Arc<PathBuf>) -> impl IntoResponse {
-    let file = match File::open(&*path).await {
-        Ok(file) => file,
-        Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
-    };
+async fn stream_file(path: Arc<PathBuf>) -> Result<AxumResponse, AppError> {
+    let file = File::open(&*path)
+        .await
+        .context(format!("File not found: {}", path.display()))?;
 
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("download");
 
-    let content_length = match tokio::fs::metadata(&*path).await {
-        Ok(meta) => meta.len(),
-        Err(_) => 0,
-    };
+    let content_length = tokio::fs::metadata(&*path)
+        .await
+        .context("Failed to read file metadata")?
+        .len();
+
     println!(
         "[ INFO ] : Serving file of size {}",
         format_size(content_length)
@@ -201,5 +225,10 @@ async fn stream_file(path: Arc<PathBuf>) -> impl IntoResponse {
         response = response.header(header::CONTENT_LENGTH, content_length);
     }
 
-    response.body(body).unwrap().into_response()
+    let final_response = response
+        .body(body)
+        .context("Failed to construct response body")?
+        .into_response();
+
+    Ok(final_response)
 }

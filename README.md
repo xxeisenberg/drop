@@ -27,7 +27,7 @@ The executable can found at `./target/release/drop`
 ```bash
 cargo install --git https://github.com/xxeisenberg/drop.git
 ```
-_(Make sure $HOME/.cargo/bin on Linux/macOS or %USERPROFILE%\.cargo\bin on Windows is in your system's PATH.)_
+_(Make sure `$HOME/.cargo/bin` on Linux/macOS or `%USERPROFILE%\.cargo\bin` on Windows is in your system's PATH.)_
 ## Usage
 
 ### Send a file
@@ -46,7 +46,7 @@ drop receive
 Scan the QR code or open the provided link on another device. Select your file(s) and hit upload. It will save to your current working directory.
 
 ### Options
-By default, `drop` uses port `1844`. You can specify a custom port using the `-p` or `--port` flag:
+By default, `drop` uses port `1844`. You can specify a custom port (1024–65535) using the `-p` or `--port` flag:
 ```bash
 drop receive --port 8080
 ```
