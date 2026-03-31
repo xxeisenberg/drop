@@ -1,55 +1,19 @@
+mod cli;
+mod client;
+mod discovery;
+mod server;
+mod utils;
+
 use axum::{
-    Extension, Router,
-    body::Body,
-    extract::{DefaultBodyLimit, Multipart},
-    http::{Response, StatusCode, header},
-    response::IntoResponse,
+    extract::DefaultBodyLimit,
     routing::{get, post},
+    Extension, Router,
 };
-use clap::{Parser, Subcommand, ValueEnum};
-use indicatif::ProgressBar;
+use clap::Parser;
+use cli::{Cli, Commands};
 use local_ip_address::local_ip;
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use std::collections::HashMap;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-use tokio::{
-    fs::{self, File},
-    io::AsyncWriteExt,
-};
-use tokio_util::{io::ReaderStream, sync::CancellationToken};
-
-#[derive(Clone, ValueEnum, PartialEq)]
-enum Method {
-    Send,
-    Receive,
-}
-
-#[derive(Parser)]
-struct Cli {
-    /// Port number (1-65535)
-    #[arg(short, long, default_value_t = 1844)]
-    port: u16,
-
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    Send {
-        file_path: PathBuf,
-    },
-
-    Receive,
-
-    Join {
-        /// Optional: The file to upload if the host is in 'Receive' mode
-        file_path: Option<PathBuf>,
-    },
-}
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() {
@@ -60,12 +24,11 @@ async fn main() {
     match cli.command {
         Commands::Receive => {
             let local_ip = local_ip().unwrap();
-
             let ip_with_port = format!("{local_ip}:{}", cli.port);
 
             let app = Router::new()
-                .route("/", get(get_upload))
-                .route("/upload", post(post_upload))
+                .route("/", get(server::get_upload))
+                .route("/upload", post(server::post_upload))
                 .layer(DefaultBodyLimit::disable())
                 .layer(Extension(token.clone()));
 
@@ -74,15 +37,15 @@ async fn main() {
             qr2term::print_qr(&link).unwrap();
             println!("\nScan the QR or go to {}", &link);
 
-            spawn_mdns_advertiser(cli.port, "receive", token);
+            discovery::spawn_mdns_advertiser(cli.port, "receive", token);
 
             let listener = tokio::net::TcpListener::bind(&ip_with_port).await.unwrap();
             axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal(shutdown_token))
+                .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
                 .await
                 .unwrap();
-            return;
         }
+
         Commands::Send { file_path } => {
             if let Err(e) = std::fs::File::open(&file_path) {
                 eprintln!(
@@ -94,11 +57,10 @@ async fn main() {
             }
 
             let local_ip = local_ip().unwrap();
-
             let ip_with_port = format!("{local_ip}:{}", cli.port);
 
             let app = Router::new()
-                .route("/download", get(download))
+                .route("/download", get(server::download))
                 .layer(Extension(Arc::new(file_path)))
                 .layer(Extension(token.clone()));
 
@@ -107,465 +69,17 @@ async fn main() {
             qr2term::print_qr(&link).unwrap();
             println!("\nScan the QR or go to {}", &link);
 
-            spawn_mdns_advertiser(cli.port, "send", token);
+            discovery::spawn_mdns_advertiser(cli.port, "send", token);
 
             let listener = tokio::net::TcpListener::bind(&ip_with_port).await.unwrap();
             axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal(shutdown_token))
+                .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
                 .await
                 .unwrap();
         }
 
         Commands::Join { file_path } => {
-            println!("[ INFO ] : Searching for RustShare on the local network...");
-
-            let mdns = mdns_sd::ServiceDaemon::new().unwrap();
-            let service_type = "_dropshare._tcp.local.";
-            let receiver = mdns.browse(service_type).unwrap();
-
-            while let Ok(event) = receiver.recv_async().await {
-                if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-                    let ip = info
-                        .get_addresses()
-                        .iter()
-                        .find(|addr| addr.is_ipv4())
-                        .unwrap();
-                    let port = info.get_port();
-
-                    let properties = info.get_properties();
-                    let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
-
-                    println!(
-                        "\n[ SUCCESS ] : Found a host in '{}' mode at {}",
-                        mode,
-                        info.get_fullname()
-                    );
-
-                    let client = reqwest::Client::new();
-
-                    if mode == "send" {
-                        let url = format!("http://{}:{}/download", ip, port);
-                        println!("[ INFO ] : Automatically downloading from {}...", url);
-
-                        let mut res = client.get(&url).send().await.unwrap();
-                        let total_size = res.content_length().unwrap_or(0);
-
-                        // Try to extract the original filename from the headers, fallback to "downloaded_file"
-                        let mut file_name = String::from("downloaded_file");
-                        if let Some(cd) = res.headers().get(reqwest::header::CONTENT_DISPOSITION) {
-                            let cd_str = cd.to_str().unwrap_or("");
-                            if let Some(idx) = cd_str.find("filename=\"") {
-                                let start = idx + 10;
-                                if let Some(end) = cd_str[start..].find("\"") {
-                                    file_name = cd_str[start..start + end].to_string();
-                                }
-                            }
-                        }
-
-                        let pb = ProgressBar::new(total_size);
-                        println!("[ INFO ] : Incoming file size: {}", format_size(total_size));
-                        pb.set_message(format!("Downloading \"{}\"...", file_name));
-
-                        let mut file = fs::File::create(&file_name).await.unwrap();
-
-                        // Stream the download to disk chunk by chunk
-                        while let Some(chunk) = res.chunk().await.unwrap() {
-                            file.write_all(&chunk).await.unwrap();
-                            pb.inc(chunk.len() as u64);
-                        }
-                        pb.finish_with_message(format!("[ SUCCESS ] : Saved as {}", file_name));
-                    } else if mode == "receive" {
-                        let url = format!("http://{}:{}/upload", ip, port);
-
-                        if let Some(path) = file_path {
-                            println!(
-                                "[ INFO ] : Automatically uploading {} to {}...",
-                                path.display(),
-                                url
-                            );
-
-                            let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
-
-                            // Open the file and stream it directly into the multipart form
-                            let file = fs::File::open(&path).await.unwrap();
-                            let part = reqwest::multipart::Part::stream(file).file_name(file_name);
-
-                            let form = reqwest::multipart::Form::new().part("uploadedFile", part);
-
-                            let res = client.post(&url).multipart(form).send().await.unwrap();
-
-                            if res.status().is_success() {
-                                println!("[ SUCCESS ] : Upload complete!");
-                            } else {
-                                println!(
-                                    "[ ERROR ] : Upload failed. Server responded with: {}",
-                                    res.status()
-                                );
-                            }
-                        } else {
-                            println!(
-                                "[ ERROR ] : The host is waiting to receive a file, but you didn't provide one."
-                            );
-                            println!(
-                                "Run the command again like this: cargo run -- join ./your_file.txt"
-                            );
-                        }
-                    }
-
-                    // We completed our task, so stop listening and exit
-                    break;
-                }
-            }
+            client::join_network(file_path).await;
         }
     }
-}
-
-fn spawn_mdns_advertiser(port: u16, mode: &'static str, token: CancellationToken) {
-    tokio::spawn(async move {
-        let mdns = ServiceDaemon::new().unwrap();
-
-        let service_type = "_dropshare._tcp.local.";
-        let instance_name = format!("DropShare-{}", mode);
-        let host_name = format!("{}.local.", instance_name);
-
-        let mut properties = HashMap::new();
-        properties.insert("mode".to_string(), mode.to_string());
-
-        let my_ip = local_ip_address::local_ip().unwrap().to_string();
-
-        let service_info = ServiceInfo::new(
-            service_type,
-            &instance_name,
-            &host_name,
-            my_ip,
-            port,
-            Some(properties),
-        )
-        .unwrap();
-
-        // Start broadcasting
-        mdns.register(service_info).unwrap();
-        println!(
-            "[ mDNS ] : Broadcasting as '{}' on the local network",
-            instance_name
-        );
-
-        token.cancelled().await;
-
-        let full_name = format!("{}.{}", instance_name, service_type);
-        mdns.unregister(&full_name).unwrap();
-    });
-}
-
-async fn shutdown_signal(token: CancellationToken) {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            println!("\n[ INFO ] : Ctrl+C received, shutting down...");
-            token.cancel();
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        },
-        _ = terminate => {
-            println!("\n[ INFO ] : Terminate signal received, shutting down...");
-            token.cancel();
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        },
-        _ = token.cancelled() => {
-            println!("\n[ INFO ] : Transfer complete, shutting down server...");
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-    }
-}
-
-async fn download(
-    Extension(file_path): Extension<Arc<PathBuf>>,
-    Extension(token): Extension<CancellationToken>,
-) -> impl IntoResponse {
-    let res = stream_file(file_path).await;
-    token.cancel();
-    res
-}
-
-async fn get_upload() -> impl IntoResponse {
-    let html = "<html lang=\"en\">
-    <head>
-        <meta charset=\"UTF-8\">
-        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-        <title>File Upload</title>
-        <style>
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f3f4f6;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-            }
-
-            .upload-container {
-                background-color: #ffffff;
-                padding: 40px;
-                border-radius: 12px;
-                box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
-                text-align: center;
-                width: 100%;
-                max-width: 350px;
-            }
-
-            .upload-container h2 {
-                margin-top: 0;
-                color: #1f2937;
-                font-size: 1.5rem;
-                margin-bottom: 24px;
-            }
-
-            input[type=\"file\"] {
-                display: block;
-                width: 100%;
-                margin-bottom: 24px;
-                padding: 16px 10px;
-                border: 2px dashed #d1d5db;
-                border-radius: 8px;
-                background-color: #f9fafb;
-                color: #4b5563;
-                box-sizing: border-box;
-                cursor: pointer;
-                transition: border-color 0.3s ease;
-            }
-
-            input[type=\"file\"]:hover {
-                border-color: #3b82f6;
-            }
-
-            input[type=\"file\"]::file-selector-button {
-                background-color: #e5e7eb;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 6px;
-                color: #374151;
-                cursor: pointer;
-                margin-right: 12px;
-                font-weight: 500;
-                transition: background-color 0.3s ease;
-            }
-
-            input[type=\"file\"]::file-selector-button:hover {
-                background-color: #d1d5db;
-            }
-
-            button[type=\"submit\"] {
-                background-color: #3b82f6;
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                font-size: 16px;
-                font-weight: 600;
-                border-radius: 8px;
-                cursor: pointer;
-                width: 100%;
-                transition: background-color 0.3s ease, transform 0.1s ease;
-            }
-
-            button[type=\"submit\"]:hover {
-                background-color: #2563eb;
-            }
-
-            button[type=\"submit\"]:active {
-                transform: scale(0.98);
-            }
-        </style>
-    </head>
-    <body>
-        <div class=\"upload-container\">
-            <h2>Upload Files</h2>
-            <form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">
-                <input type=\"file\" name=\"uploadedFile\" required multiple>
-                <button type=\"submit\">Upload</button>
-            </form>
-        </div>
-    </body>
-    </html>";
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .body(Body::from(html))
-        .unwrap()
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1000;
-    const MB: u64 = 1000 * KB;
-    const GB: u64 = 1000 * MB;
-
-    if bytes >= GB {
-        format!("{:.2} Gigabytes", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} Megabytes", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} Kilobytes", bytes as f64 / KB as f64)
-    } else {
-        format!("{} bytes", bytes)
-    }
-}
-
-async fn post_upload(
-    Extension(token): Extension<CancellationToken>,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    loop {
-        let mut field = match multipart.next_field().await {
-            Ok(Some(f)) => f,
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("[ ERROR ] : Failed to read multipart field: {}", e);
-                return (StatusCode::BAD_REQUEST, "Malformed upload data").into_response();
-            }
-        };
-
-        let original_file_name = field.file_name().unwrap_or("file").to_string();
-        let mut file_name = original_file_name.clone();
-
-        let bar = ProgressBar::new_spinner();
-        bar.set_style(
-                    indicatif::ProgressStyle::default_spinner()
-                        .template("{spinner:.green} [{elapsed_precise}] Receiving \"{msg}\" — {bytes} ({bytes_per_sec})")
-                        .unwrap(),
-                );
-        bar.set_message(file_name.clone());
-        bar.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        let mut counter = 1;
-        let (base_name, ext) = match original_file_name.rsplit_once('.') {
-            Some((n, e)) => (n, format!(".{}", e)),
-            None => (original_file_name.as_str(), String::new()),
-        };
-
-        while Path::new(&file_name).exists() {
-            file_name = format!("{}({}){}", base_name, counter, ext);
-            counter += 1;
-        }
-
-        let mut file = match fs::File::create(&file_name).await {
-            Ok(f) => f,
-            Err(e) => {
-                bar.abandon_with_message(format!(
-                    "[ ERROR ] : Could not create file on disk: {}",
-                    e
-                ));
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
-            }
-        };
-
-        let mut upload_successful = true;
-
-        loop {
-            match field.chunk().await {
-                Ok(Some(chunk)) => {
-                    if let Err(e) = file.write_all(&chunk).await {
-                        bar.abandon_with_message(format!(
-                            "[ ERROR ] : Failed to write to disk: {}",
-                            e
-                        ));
-                        upload_successful = false;
-                        break;
-                    }
-
-                    bar.inc(chunk.len() as u64);
-                }
-                Ok(None) => {
-                    break;
-                }
-                Err(e) => {
-                    bar.abandon_with_message(format!("[ ERROR ] : Network connection lost: {}", e));
-                    upload_successful = false;
-                    break;
-                }
-            }
-        }
-
-        if !upload_successful {
-            drop(file);
-            let _ = fs::remove_file(&file_name).await;
-            return (StatusCode::BAD_REQUEST, "Upload interrupted").into_response();
-        }
-
-        bar.finish_with_message(format!("\"{}\" received successfully", file_name));
-    }
-    token.cancel();
-
-    let html = "<html lang=\"en\">
-    <head>
-      <meta charset=\"UTF-8\" />
-      <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-      <title>Upload Status</title>
-      <style>
-        body {
-          font-family: sans-serif;
-          margin: 3rem;
-        }
-      </style>
-    </head>
-    <body>
-      <h1>upload complete</h1>
-    </body>
-    </html>";
-
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/html")
-        .body(Body::from(html))
-        .unwrap()
-}
-
-async fn stream_file(path: Arc<PathBuf>) -> impl IntoResponse {
-    let file = match File::open(&*path).await {
-        Ok(file) => file,
-        Err(_) => return (StatusCode::NOT_FOUND, "File not found").into_response(),
-    };
-
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("download");
-
-    let content_length = match tokio::fs::metadata(&*path).await {
-        Ok(meta) => meta.len(),
-        Err(_) => 0,
-    };
-    println!(
-        "[ INFO ] : Serving file of size {}",
-        format_size(content_length)
-    );
-
-    let pb = ProgressBar::new(content_length);
-    let wrapped_file = pb.wrap_async_read(file);
-
-    let content_disposition = format!("attachment; filename=\"{}\"", file_name);
-    let stream = ReaderStream::new(wrapped_file);
-    let body = Body::from_stream(stream);
-
-    let mut response = Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_DISPOSITION, content_disposition);
-
-    if content_length > 0 {
-        response = response.header(header::CONTENT_LENGTH, content_length);
-    }
-
-    response.body(body).unwrap().into_response()
 }
