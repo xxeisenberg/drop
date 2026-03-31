@@ -8,10 +8,8 @@ use axum::{
     Extension,
 };
 use indicatif::ProgressBar;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
@@ -88,6 +86,7 @@ pub async fn get_upload() -> Result<impl IntoResponse, AppError> {
 
 pub async fn post_upload(
     Extension(token): Extension<CancellationToken>,
+    Extension(upload_dir): Extension<Arc<PathBuf>>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
     loop {
@@ -116,12 +115,15 @@ pub async fn post_upload(
             None => (original_file_name.as_str(), String::new()),
         };
 
-        while Path::new(&file_name).exists() {
+        let mut target_path = upload_dir.join(&file_name);
+
+        while target_path.exists() {
             file_name = format!("{}({}){}", base_name, counter, ext);
+            target_path = upload_dir.join(&file_name);
             counter += 1;
         }
 
-        let mut file = match fs::File::create(&file_name).await {
+        let mut file = match fs::File::create(&target_path).await {
             Ok(f) => f,
             Err(e) => {
                 bar.abandon_with_message(format!(
@@ -191,9 +193,15 @@ pub async fn post_upload(
 }
 
 async fn stream_file(path: Arc<PathBuf>) -> Result<AxumResponse, AppError> {
-    let file = File::open(&*path)
-        .await
-        .context(format!("File not found: {}", path.display()))?;
+    let file = match File::open(&*path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((StatusCode::NOT_FOUND, "File not found").into_response());
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to open file: {}", e).into());
+            }
+        };
 
     let file_name = path
         .file_name()

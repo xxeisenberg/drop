@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tokio::{fs, io::AsyncWriteExt};
 
 pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
-    println!("[ INFO ] : Searching for RustShare on the local network...");
+    println!("[ INFO ] : Searching for drop on the local network...");
 
     let mdns = mdns_sd::ServiceDaemon::new()
         .context("Failed to start mDNS service daemon")?;
