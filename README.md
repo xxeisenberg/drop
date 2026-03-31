@@ -46,7 +46,7 @@ drop receive
 Scan the QR code or open the provided link on another device. Select your file(s) and hit upload. It will save to your current working directory.
 
 ### Options
-By default, `drop` uses port `6969`. You can specify a custom port using the `-p` or `--port` flag:
+By default, `drop` uses port `1844`. You can specify a custom port using the `-p` or `--port` flag:
 ```bash
 drop receive --port 8080
 ```
@@ -55,5 +55,5 @@ drop receive --port 8080
 
 * Both devices **must** be connected to the exact same Wi-Fi or local network.
 * Ensure your host system's firewall allows incoming TCP traffic on the port you are using. 
-  * *Example (ufw):* `sudo ufw allow 6969/tcp`
-  * *Example (firewalld):* `sudo firewall-cmd --add-port=6969/tcp`
+  * *Example (ufw):* `sudo ufw allow 1844/tcp`
+  * *Example (firewalld):* `sudo firewall-cmd --add-port=1844/tcp`

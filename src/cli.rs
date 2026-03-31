@@ -9,8 +9,8 @@ pub enum Method {
 
 #[derive(Parser)]
 pub struct Cli {
-    /// Port number (1-65535)
-    #[arg(short, long, default_value_t = 1844)]
+    /// Port number (1024-65535)
+    #[arg(short, long, default_value_t = 1844, value_parser = clap::value_parser!(u16).range(1024..))]
     pub port: u16,
 
     #[command(subcommand)]
