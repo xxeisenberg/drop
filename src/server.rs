@@ -163,7 +163,7 @@ pub async fn post_upload(
 
         if !upload_successful {
             drop(file);
-            let _ = fs::remove_file(&file_name).await;
+            let _ = fs::remove_file(&target_path).await;
             return Err(anyhow::anyhow!("Upload interrupted").into());
         }
 

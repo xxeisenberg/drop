@@ -12,7 +12,7 @@ use axum::{
 use clap::Parser;
 use cli::{Cli, Commands};
 use local_ip_address::local_ip;
-use std::{env::current_dir, sync::Arc};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use anyhow::{Result,Context};
 
@@ -27,12 +27,14 @@ async fn main() -> Result<()> {
             let local_ip = local_ip().context("Failed to obtain local IP")?;
             let ip_with_port = format!("{local_ip}:{}", cli.port);
 
+            let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+
             let app = Router::new()
                 .route("/", get(server::get_upload))
                 .route("/upload", post(server::post_upload))
                 .layer(DefaultBodyLimit::disable())
                 .layer(Extension(token.clone()))
-                .layer(Extension(current_dir));
+                .layer(Extension(Arc::new(current_dir)));
 
             let link = format!("http://{ip_with_port}");
             println!();
