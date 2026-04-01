@@ -1,5 +1,6 @@
 use crate::utils::format_size;
 use anyhow::{Context, Result};
+use dialoguer::{Select, theme::ColorfulTheme};
 use indicatif::ProgressBar;
 use std::path::PathBuf;
 use tokio::{fs, io::AsyncWriteExt};
@@ -7,110 +8,165 @@ use tokio::{fs, io::AsyncWriteExt};
 pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
     println!("[ INFO ] : Searching for drop on the local network...");
 
-    let mdns = mdns_sd::ServiceDaemon::new()
-        .context("Failed to start mDNS service daemon")?;
+    let mdns = mdns_sd::ServiceDaemon::new().context("Failed to start mDNS service daemon")?;
     let service_type = "_dropshare._tcp.local.";
-    let receiver = mdns.browse(service_type)
+    let receiver = mdns
+        .browse(service_type)
         .context("Failed to browse for mDNS services")?;
 
-    while let Ok(event) = receiver.recv_async().await {
-        if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-            let ip = info
-                .get_addresses()
-                .iter()
-                .find(|addr| addr.is_ipv4())
-                .context("Found a host, but it does not have a valid IPv4 address")?;
+    let mut hosts = Vec::new();
 
-            let port = info.get_port();
-            let properties = info.get_properties();
-            let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
+    let timeout_duration = std::time::Duration::from_secs(1);
+    let _ = tokio::time::timeout(timeout_duration, async {
+        while let Ok(event) = receiver.recv_async().await {
+            if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+                hosts.push(info);
+            }
+        }
+    })
+    .await;
 
-            println!(
-                "\n[ SUCCESS ] : Found a host in '{}' mode at {}",
-                mode,
-                info.get_fullname()
-            );
+    if hosts.is_empty() {
+        println!(
+            "\n[ ERROR ] : No hosts found on the local network. Make sure the sender is running."
+        );
+        return Ok(());
+    }
 
-            let client = reqwest::Client::new();
+    let selected_host = if hosts.len() == 1 {
+        &hosts[0]
+    } else {
+        println!();
+        let host_names: Vec<String> = hosts
+            .iter()
+            .map(|h| {
+                let ip = h
+                    .get_addresses()
+                    .iter()
+                    .find(|addr| addr.is_ipv4())
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "Unknown IP".to_string());
 
-            if mode == "send" {
-                let url = format!("http://{}:{}/download", ip, port);
-                println!("[ INFO ] : Automatically downloading from {}...", url);
+                let clean_name = h.get_fullname().replace("._dropshare._tcp.local.", "");
 
-                let mut res = client.get(&url).send().await
-                    .context(format!("Failed to connect to host at {}", url))?;
+                format!("{} [{}]", clean_name, ip)
+            })
+            .collect();
 
-                let total_size = res.content_length().unwrap_or(0);
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Multiple hosts found! Use arrow keys to select one")
+            .default(0)
+            .items(&host_names)
+            .interact()
+            .context("Failed to render terminal menu")?;
 
-                let mut file_name = String::from("downloaded_file");
-                if let Some(cd) = res.headers().get(reqwest::header::CONTENT_DISPOSITION) {
-                    let cd_str = cd.to_str().unwrap_or("");
-                    if let Some(idx) = cd_str.find("filename=\"") {
-                        let start = idx + 10;
-                        if let Some(end) = cd_str[start..].find("\"") {
-                            file_name = cd_str[start..start + end].to_string();
-                        }
-                    }
-                }
+        &hosts[selection]
+    };
 
-                let pb = ProgressBar::new(total_size);
-                println!("[ INFO ] : Incoming file size: {}", format_size(total_size));
-                pb.set_message(format!("Downloading \"{}\"...", file_name));
+    let ip = selected_host
+        .get_addresses()
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .context("Selected host does not have a valid IPv4 address")?;
+    let port = selected_host.get_port();
+    let properties = selected_host.get_properties();
+    let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
 
-                let mut file = fs::File::create(&file_name).await
-                    .context(format!("Failed to create local file: {}", file_name))?;
+    println!(
+        "\n[ SUCCESS ] : Connecting to host in '{}' mode at {}",
+        mode,
+        selected_host.get_fullname()
+    );
 
-                while let Some(chunk) = res.chunk().await.context("Failed to read chunk from network")? {
-                    file.write_all(&chunk).await
-                        .context("Failed to write downloaded chunk to disk")?;
-                    pb.inc(chunk.len() as u64);
-                }
-                pb.finish_with_message(format!("[ SUCCESS ] : Saved as {}", file_name));
+    let client = reqwest::Client::new();
 
-            } else if mode == "receive" {
-                let url = format!("http://{}:{}/upload", ip, port);
+    if mode == "send" {
+        let url = format!("http://{}:{}/download", ip, port);
+        println!("[ INFO ] : Automatically downloading from {}...", url);
 
-                if let Some(path) = file_path {
-                    println!(
-                        "[ INFO ] : Automatically uploading {} to {}...",
-                        path.display(),
-                        url
-                    );
+        let mut res = client
+            .get(&url)
+            .send()
+            .await
+            .context(format!("Failed to connect to host at {}", url))?;
 
-                    let file_name = path.file_name()
-                        .context("The provided path does not have a valid file name")?
-                        .to_str()
-                        .context("The file name contains invalid UTF-8 characters")?
-                        .to_string();
+        let total_size = res.content_length().unwrap_or(0);
 
-                    let file = fs::File::open(&path).await
-                        .context(format!("Failed to open file for reading: {}", path.display()))?;
-
-                    let part = reqwest::multipart::Part::stream(file).file_name(file_name);
-                    let form = reqwest::multipart::Form::new().part("uploadedFile", part);
-
-                    let res = client.post(&url).multipart(form).send().await
-                        .context("Failed to send file upload request to the host")?;
-
-                    if res.status().is_success() {
-                        println!("[ SUCCESS ] : Upload complete!");
-                    } else {
-                        println!(
-                            "[ ERROR ] : Upload failed. Server responded with: {}",
-                            res.status()
-                        );
-                    }
-                } else {
-                    println!(
-                        "[ ERROR ] : The host is waiting to receive a file, but you didn't provide one."
-                    );
-                    println!(
-                        "Run the command again like this: cargo run -- join ./your_file.txt"
-                    );
+        let mut file_name = String::from("downloaded_file");
+        if let Some(cd) = res.headers().get(reqwest::header::CONTENT_DISPOSITION) {
+            let cd_str = cd.to_str().unwrap_or("");
+            if let Some(idx) = cd_str.find("filename=\"") {
+                let start = idx + 10;
+                if let Some(end) = cd_str[start..].find("\"") {
+                    file_name = cd_str[start..start + end].to_string();
                 }
             }
+        }
 
-            break;
+        let pb = ProgressBar::new(total_size);
+        println!("[ INFO ] : Incoming file size: {}", format_size(total_size));
+        pb.set_message(format!("Downloading \"{}\"...", file_name));
+
+        let mut file = fs::File::create(&file_name)
+            .await
+            .context(format!("Failed to create local file: {}", file_name))?;
+
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .context("Failed to read chunk from network")?
+        {
+            file.write_all(&chunk)
+                .await
+                .context("Failed to write downloaded chunk to disk")?;
+            pb.inc(chunk.len() as u64);
+        }
+        pb.finish_with_message(format!("[ SUCCESS ] : Saved as {}", file_name));
+    } else if mode == "receive" {
+        let url = format!("http://{}:{}/upload", ip, port);
+
+        if let Some(path) = file_path {
+            println!(
+                "[ INFO ] : Automatically uploading {} to {}...",
+                path.display(),
+                url
+            );
+
+            let file_name = path
+                .file_name()
+                .context("The provided path does not have a valid file name")?
+                .to_str()
+                .context("The file name contains invalid UTF-8 characters")?
+                .to_string();
+
+            let file = fs::File::open(&path).await.context(format!(
+                "Failed to open file for reading: {}",
+                path.display()
+            ))?;
+
+            let part = reqwest::multipart::Part::stream(file).file_name(file_name);
+            let form = reqwest::multipart::Form::new().part("uploadedFile", part);
+
+            let res = client
+                .post(&url)
+                .multipart(form)
+                .send()
+                .await
+                .context("Failed to send file upload request to the host")?;
+
+            if res.status().is_success() {
+                println!("[ SUCCESS ] : Upload complete!");
+            } else {
+                println!(
+                    "[ ERROR ] : Upload failed. Server responded with: {}",
+                    res.status()
+                );
+            }
+        } else {
+            println!(
+                "[ ERROR ] : The host is waiting to receive a file, but you didn't provide one."
+            );
+            println!("Run the command again like this: cargo run -- join ./your_file.txt");
         }
     }
 

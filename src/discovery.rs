@@ -1,18 +1,26 @@
+use anyhow::{Context, Result};
 use local_ip_address::local_ip;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
-use anyhow::{Result, Context};
 
 pub fn spawn_mdns_advertiser(port: u16, mode: &'static str, token: CancellationToken) {
     tokio::spawn(async move {
         let result: Result<()> = async {
-            let mdns = ServiceDaemon::new()
-                .context("Failed to create mDNS service daemon")?;
+            let mdns = ServiceDaemon::new().context("Failed to create mDNS service daemon")?;
 
             let service_type = "_dropshare._tcp.local.";
-            let instance_name = format!("DropShare-{}", mode);
-            let host_name = format!("{}.local.", instance_name);
+            let pc_name = whoami::devicename()
+                .unwrap_or_else(|_| whoami::hostname().unwrap_or_else(|_| "Host".to_string()));
+            let raw_instance_name = format!("{} (DropShare-{})", pc_name, mode);
+            let mut instance_name = String::new();
+            for c in raw_instance_name.chars() {
+                if instance_name.len() + c.len_utf8() > 63 {
+                    break;
+                }
+                instance_name.push(c);
+            }
+            let host_name = format!("{}.local.", instance_name.replace(" ", "-"));
 
             let mut properties = HashMap::new();
             properties.insert("mode".to_string(), mode.to_string());
