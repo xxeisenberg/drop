@@ -7,14 +7,29 @@ use tokio_util::sync::CancellationToken;
 pub fn get_mdns_names(mode: &str) -> (String, String) {
     let pc_name = whoami::devicename()
         .unwrap_or_else(|_| whoami::hostname().unwrap_or_else(|_| "Host".to_string()));
-    let raw_instance_name = format!("{} (DropShare-{})", pc_name, mode);
+    let suffix = format!(" (DropShare-{})", mode);
+    let max_instance_len: usize = 63;
+
     let mut instance_name = String::new();
-    for c in raw_instance_name.chars() {
-        if instance_name.len() + c.len_utf8() > 63 {
+    let max_prefix_len = max_instance_len.saturating_sub(suffix.len());
+    for c in pc_name.chars() {
+        if instance_name.len() + c.len_utf8() > max_prefix_len {
             break;
         }
         instance_name.push(c);
     }
+
+    if instance_name.is_empty() && suffix.len() > max_instance_len {
+        for c in suffix.chars() {
+            if instance_name.len() + c.len_utf8() > max_instance_len {
+                break;
+            }
+            instance_name.push(c);
+        }
+    } else {
+        instance_name.push_str(&suffix);
+    }
+
     let host_name = format!("{}.local.", instance_name.replace(' ', "-"));
     (instance_name, host_name)
 }

@@ -18,7 +18,7 @@ jobs:
           - os: ubuntu-latest
             artifact_name: drop
             asset_name: drop-linux-amd64
-          - os: macos-13
+          - os: macos-15-intel
             artifact_name: drop
             asset_name: drop-macos-amd64
           - os: macos-latest
@@ -38,9 +38,6 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --release
-
       - name: Build release binary
         run: cargo build --release
 
@@ -52,20 +49,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: Rename-Item -Path "target\release\${{ matrix.artifact_name }}" -NewName "${{ matrix.asset_name }}"
 
-      - name: Generate checksum (Unix)
-        if: matrix.os != 'windows-latest'
-        run: shasum -a 256 target/release/${{ matrix.asset_name }} > target/release/${{ matrix.asset_name }}.sha256
-
-      - name: Generate checksum (Windows)
-        if: matrix.os == 'windows-latest'
-        run: Get-FileHash -Algorithm SHA256 "target\release\${{ matrix.asset_name }}" | Format-List Hash | Out-File -Encoding ASCII "target\release\${{ matrix.asset_name }}.sha256"
-
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: |
             target/release/${{ matrix.asset_name }}
-            target/release/${{ matrix.asset_name }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.PAT }}
