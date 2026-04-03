@@ -7,10 +7,6 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
-    /// Port number to host or connect on (1024-65535)
-    #[arg(short, long, default_value_t = 1844, value_parser = clap::value_parser!(u16).range(1024..))]
-    pub port: u16,
-
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -21,10 +17,30 @@ pub enum Commands {
     Send {
         /// Path to the file to send
         file_path: PathBuf,
+
+        /// Port number to host on (1024-65535)
+        #[arg(short, long, default_value_t = 1844, value_parser = clap::value_parser!(u16).range(1024..))]
+        port: u16,
+
+        /// Enable end-to-end encryption for CLI-to-CLI transfers
+        #[arg(long, default_value_t = false)]
+        encrypt: bool,
     },
 
     /// Host a session and wait to receive a file from a joining peer
-    Receive,
+    Receive {
+        /// Port number to host on (1024-65535)
+        #[arg(short, long, default_value_t = 1844, value_parser = clap::value_parser!(u16).range(1024..))]
+        port: u16,
+
+        /// Maximum upload file size in megabytes (default: no limit)
+        #[arg(long)]
+        max_size: Option<usize>,
+
+        /// Enable end-to-end encryption for CLI-to-CLI transfers
+        #[arg(long, default_value_t = false)]
+        encrypt: bool,
+    },
 
     /// Join an existing session hosted by another peer
     Join {

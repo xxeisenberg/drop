@@ -4,26 +4,35 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
-pub fn spawn_mdns_advertiser(port: u16, mode: &'static str, token: CancellationToken) {
+pub fn get_mdns_names(mode: &str) -> (String, String) {
+    let pc_name = whoami::devicename()
+        .unwrap_or_else(|_| whoami::hostname().unwrap_or_else(|_| "Host".to_string()));
+    let raw_instance_name = format!("{} (DropShare-{})", pc_name, mode);
+    let mut instance_name = String::new();
+    for c in raw_instance_name.chars() {
+        if instance_name.len() + c.len_utf8() > 63 {
+            break;
+        }
+        instance_name.push(c);
+    }
+    let host_name = format!("{}.local.", instance_name.replace(' ', "-"));
+    (instance_name, host_name)
+}
+
+pub fn spawn_mdns_advertiser(port: u16, mode: &'static str, auth_token: String, enc_key: Option<String>, token: CancellationToken) {
     tokio::spawn(async move {
         let result: Result<()> = async {
             let mdns = ServiceDaemon::new().context("Failed to create mDNS service daemon")?;
 
             let service_type = "_dropshare._tcp.local.";
-            let pc_name = whoami::devicename()
-                .unwrap_or_else(|_| whoami::hostname().unwrap_or_else(|_| "Host".to_string()));
-            let raw_instance_name = format!("{} (DropShare-{})", pc_name, mode);
-            let mut instance_name = String::new();
-            for c in raw_instance_name.chars() {
-                if instance_name.len() + c.len_utf8() > 63 {
-                    break;
-                }
-                instance_name.push(c);
-            }
-            let host_name = format!("{}.local.", instance_name.replace(" ", "-"));
+            let (instance_name, host_name) = get_mdns_names(mode);
 
             let mut properties = HashMap::new();
             properties.insert("mode".to_string(), mode.to_string());
+            properties.insert("token".to_string(), auth_token.clone());
+            if let Some(ref key) = enc_key {
+                properties.insert("enc_key".to_string(), key.clone());
+            }
 
             let my_ip = local_ip()
                 .context("Failed to determine local IP address for broadcasting")?

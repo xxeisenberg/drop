@@ -1,4 +1,24 @@
 use tokio_util::sync::CancellationToken;
+use std::path::{Path, PathBuf};
+
+pub fn get_unique_filename(dir: &Path, file_name: &str) -> (String, PathBuf) {
+    let mut counter = 1;
+    let mut current_name = file_name.to_string();
+    let (base_name, ext) = match file_name.rsplit_once('.') {
+        Some((n, e)) => (n, format!(".{}", e)),
+        None => (file_name, String::new()),
+    };
+
+    let mut target_path = dir.join(&current_name);
+
+    while target_path.exists() {
+        current_name = format!("{}({}){}", base_name, counter, ext);
+        target_path = dir.join(&current_name);
+        counter += 1;
+    }
+
+    (current_name, target_path)
+}
 
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1000;
