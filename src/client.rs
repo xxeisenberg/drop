@@ -188,15 +188,15 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
             }
 
             // Decrypt the last chunk
-            if let Some(dec) = decryptor.take() {
-                if !data_buf.is_empty() {
-                    let plaintext = dec
-                        .decrypt_last(&data_buf)
-                        .context("Final decryption failed")?;
-                    file.write_all(&plaintext)
-                        .await
-                        .context("Failed to write final decrypted chunk")?;
-                }
+            if let Some(dec) = decryptor.take()
+                && !data_buf.is_empty()
+            {
+                let plaintext = dec
+                    .decrypt_last(&data_buf)
+                    .context("Final decryption failed")?;
+                file.write_all(&plaintext)
+                    .await
+                    .context("Failed to write final decrypted chunk")?;
             }
 
             file.flush().await.context("Failed to flush file buffer")?;
