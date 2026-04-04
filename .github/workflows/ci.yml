@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset_name: drop-linux-amd64
+            binary_path: target/release/drop
+          - os: macos-15-intel
+            asset_name: drop-macos-amd64
+            binary_path: target/release/drop
+          - os: macos-14
+            asset_name: drop-macos-arm64
+            binary_path: target/release/drop
+          - os: windows-2025
+            asset_name: drop-windows-amd64.exe
+            binary_path: target/release/drop.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Run tests
+        run: cargo test --release --locked
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
