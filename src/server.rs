@@ -40,10 +40,14 @@ where
 }
 
 pub async fn validate_token(
-    Extension(expected_token): Extension<Arc<String>>,
+    Extension(expected_token): Extension<Option<Arc<String>>>,
     request: Request,
     next: Next,
 ) -> AxumResponse {
+    let Some(expected_token) = expected_token else {
+        return next.run(request).await;
+    };
+
     let query = request.uri().query().unwrap_or("");
     let is_valid = query.split('&').any(|pair| {
         pair.split_once('=')
@@ -76,7 +80,7 @@ pub async fn download(
 }
 
 pub async fn get_upload(
-    Extension(auth_token): Extension<Arc<String>>,
+    Extension(auth_token): Extension<Option<Arc<String>>>,
 ) -> Result<impl IntoResponse, AppError> {
     let html = "<html lang=\"en\">
     <head>
@@ -107,10 +111,9 @@ pub async fn get_upload(
     </body>
     </html>";
 
-    let html = html.replace(
-        "action=\"/upload\"",
-        &format!("action=\"/upload?token={}\"", auth_token),
-    );
+    let action =
+        crate::utils::with_optional_token("/upload", auth_token.as_deref().map(String::as_str));
+    let html = html.replace("action=\"/upload\"", &format!("action=\"{action}\""));
 
     let response = Response::builder()
         .header(header::CONTENT_TYPE, "text/html")

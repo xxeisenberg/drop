@@ -26,14 +26,21 @@ async fn main() -> Result<()> {
     let shutdown_token = token.clone();
 
     match cli.command {
-        Commands::Receive { port, max_size, encrypt } => {
-            let auth_token: Arc<String> = Arc::new(
-                rand::rng()
-                    .sample_iter(Alphanumeric)
-                    .take(32)
-                    .map(char::from)
-                    .collect(),
-            );
+        Commands::Receive {
+            port,
+            max_size,
+            encrypt,
+            no_link_token,
+        } => {
+            let auth_token: Option<Arc<String>> = (!no_link_token).then(|| {
+                Arc::new(
+                    rand::rng()
+                        .sample_iter(Alphanumeric)
+                        .take(32)
+                        .map(char::from)
+                        .collect(),
+                )
+            });
 
             let enc_key: Option<Arc<[u8; 32]>> = if encrypt {
                 let key = crypto::generate_key();
@@ -64,16 +71,22 @@ async fn main() -> Result<()> {
                 .layer(Extension(auth_token.clone()))
                 .layer(Extension(enc_key.clone()));
 
-            let link = format!("http://{ip_with_port}?token={}", auth_token);
+            let link = utils::with_optional_token(
+                &format!("http://{ip_with_port}"),
+                auth_token.as_deref().map(String::as_str),
+            );
             println!();
 
             qr2term::print_qr(&link).context("Failed to print QR code")?;
             println!("\nScan the QR or go to {}", &link);
+            if no_link_token {
+                println!("[ INFO ] : Link token disabled for browser access");
+            }
 
             discovery::spawn_mdns_advertiser(
                 port,
                 "receive",
-                auth_token.to_string(),
+                auth_token.as_deref().cloned(),
                 enc_key_encoded.clone(),
                 token,
             );
@@ -88,7 +101,12 @@ async fn main() -> Result<()> {
                 .context(format!("Failed to serve web server at {}", ip_with_port))?;
         }
 
-        Commands::Send { file_path, port, encrypt } => {
+        Commands::Send {
+            file_path,
+            port,
+            encrypt,
+            no_link_token,
+        } => {
             if let Err(e) = std::fs::File::open(&file_path) {
                 eprintln!(
                     "[ ERROR ] : Error reading file {}. {}",
@@ -98,13 +116,15 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let auth_token: Arc<String> = Arc::new(
-                rand::rng()
-                    .sample_iter(Alphanumeric)
-                    .take(32)
-                    .map(char::from)
-                    .collect(),
-            );
+            let auth_token: Option<Arc<String>> = (!no_link_token).then(|| {
+                Arc::new(
+                    rand::rng()
+                        .sample_iter(Alphanumeric)
+                        .take(32)
+                        .map(char::from)
+                        .collect(),
+                )
+            });
 
             let enc_key: Option<Arc<[u8; 32]>> = if encrypt {
                 let key = crypto::generate_key();
@@ -126,15 +146,21 @@ async fn main() -> Result<()> {
                 .layer(Extension(auth_token.clone()))
                 .layer(Extension(enc_key.clone()));
 
-            let link = format!("http://{ip_with_port}/download?token={}", auth_token);
+            let link = utils::with_optional_token(
+                &format!("http://{ip_with_port}/download"),
+                auth_token.as_deref().map(String::as_str),
+            );
 
             qr2term::print_qr(&link).context("Failed to print QR code")?;
             println!("\nScan the QR or go to {}", &link);
+            if no_link_token {
+                println!("[ INFO ] : Link token disabled for browser access");
+            }
 
             discovery::spawn_mdns_advertiser(
                 port,
                 "send",
-                auth_token.to_string(),
+                auth_token.as_deref().cloned(),
                 enc_key_encoded.clone(),
                 token,
             );

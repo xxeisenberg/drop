@@ -75,7 +75,7 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
     let port = selected_host.get_port();
     let properties = selected_host.get_properties();
     let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
-    let auth_token = properties.get_property_val_str("token").unwrap_or("");
+    let auth_token = properties.get_property_val_str("token");
 
     let enc_key: Option<[u8; 32]> = properties
         .get_property_val_str("enc_key")
@@ -94,7 +94,10 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
     let client = reqwest::Client::new();
 
     if mode == "send" {
-        let url = format!("http://{}:{}/download?token={}", ip, port, auth_token);
+        let url = crate::utils::with_optional_token(
+            &format!("http://{}:{}/download", ip, port),
+            auth_token,
+        );
         println!("[ INFO ] : Downloading from host...");
 
         let mut req = client.get(&url);
@@ -119,10 +122,8 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
             }
         }
 
-        let (actual_file_name, _) = crate::utils::get_unique_filename(
-            std::path::Path::new(""),
-            &file_name,
-        );
+        let (actual_file_name, _) =
+            crate::utils::get_unique_filename(std::path::Path::new(""), &file_name);
 
         file_name = actual_file_name;
 
@@ -224,7 +225,10 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
             pb.finish_with_message(format!("[ SUCCESS ] : Saved as {}", file_name));
         }
     } else if mode == "receive" {
-        let url = format!("http://{}:{}/upload?token={}", ip, port, auth_token);
+        let url = crate::utils::with_optional_token(
+            &format!("http://{}:{}/upload", ip, port),
+            auth_token,
+        );
 
         if let Some(path) = file_path {
             println!("[ INFO ] : Uploading {} to host...", path.display(),);

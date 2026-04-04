@@ -1,5 +1,5 @@
-use tokio_util::sync::CancellationToken;
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 pub fn get_unique_filename(dir: &Path, file_name: &str) -> (String, PathBuf) {
     let mut counter = 1;
@@ -33,6 +33,16 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.2} Kilobytes", bytes as f64 / KB as f64)
     } else {
         format!("{} bytes", bytes)
+    }
+}
+
+pub fn with_optional_token(url: &str, token: Option<&str>) -> String {
+    match token {
+        Some(token) if !token.is_empty() => {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            format!("{url}{separator}token={token}")
+        }
+        _ => url.to_string(),
     }
 }
 

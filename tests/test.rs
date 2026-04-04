@@ -51,7 +51,7 @@ async fn test_server_get_upload_ui() {
 
     let app = Router::new()
         .route("/", get(server::get_upload))
-        .layer(Extension(Arc::new("dummy_token".to_string())))
+        .layer(Extension(Some(Arc::new("dummy_token".to_string()))))
         .layer(Extension(token));
 
     let base_url = spawn_test_server(app).await;
@@ -78,6 +78,33 @@ async fn test_server_get_upload_ui() {
     assert!(
         body_text.contains("<form action=\"/upload?token="),
         "HTML should contain the upload form"
+    );
+}
+
+#[tokio::test]
+async fn test_server_get_upload_ui_without_token() {
+    let token = CancellationToken::new();
+
+    let app = Router::new()
+        .route("/", get(server::get_upload))
+        .layer(Extension(None::<Arc<String>>))
+        .layer(Extension(token));
+
+    let base_url = spawn_test_server(app).await;
+    let client = Client::new();
+
+    let res = client.get(format!("{}/", base_url)).send().await.unwrap();
+
+    assert!(res.status().is_success(), "Expected 200 OK");
+
+    let body_text = res.text().await.unwrap();
+    assert!(
+        body_text.contains("<form action=\"/upload\""),
+        "HTML should contain a plain upload form action when tokens are disabled"
+    );
+    assert!(
+        !body_text.contains("token="),
+        "HTML should not embed a token when tokens are disabled"
     );
 }
 
@@ -202,6 +229,18 @@ fn test_utils_format_size() {
 
     // Test Gigabytes (1,000,000,000 bytes)
     assert_eq!(utils::format_size(4_120_000_000), "4.12 Gigabytes");
+}
+
+#[test]
+fn test_utils_with_optional_token() {
+    assert_eq!(
+        utils::with_optional_token("http://127.0.0.1:1844/download", Some("secret")),
+        "http://127.0.0.1:1844/download?token=secret"
+    );
+    assert_eq!(
+        utils::with_optional_token("http://127.0.0.1:1844/download", None),
+        "http://127.0.0.1:1844/download"
+    );
 }
 
 // ----------------------------------------------------------------------
@@ -422,6 +461,12 @@ fn test_cli_parsing() {
         _ => panic!("Expected Receive subcommand"),
     }
 
+    let cli = cli::Cli::try_parse_from(&["drop", "receive", "--no-link-token"]).unwrap();
+    match cli.command {
+        cli::Commands::Receive { no_link_token, .. } => assert!(no_link_token),
+        _ => panic!("Expected Receive subcommand"),
+    }
+
     // Test send subcommand
     let cli = cli::Cli::try_parse_from(&["drop", "send", "my_file.txt"]).unwrap();
     match cli.command {
@@ -429,11 +474,20 @@ fn test_cli_parsing() {
             file_path,
             port,
             encrypt,
+            no_link_token,
         } => {
             assert_eq!(file_path.to_str().unwrap(), "my_file.txt");
             assert_eq!(port, 1844);
             assert!(!encrypt);
+            assert!(!no_link_token);
         }
+        _ => panic!("Expected Send subcommand"),
+    }
+
+    let cli =
+        cli::Cli::try_parse_from(&["drop", "send", "my_file.txt", "--no-link-token"]).unwrap();
+    match cli.command {
+        cli::Commands::Send { no_link_token, .. } => assert!(no_link_token),
         _ => panic!("Expected Send subcommand"),
     }
 }
@@ -480,7 +534,7 @@ async fn test_server_token_validation() {
     let app = Router::new()
         .route("/protected", get(|| async { "Success" }))
         .layer(axum::middleware::from_fn(server::validate_token))
-        .layer(Extension(expected_token.clone()))
+        .layer(Extension(Some(expected_token.clone())))
         .layer(Extension(token));
 
     let base_url = spawn_test_server(app).await;
@@ -508,6 +562,29 @@ async fn test_server_token_validation() {
         .send()
         .await
         .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await.unwrap(), "Success");
+}
+
+#[tokio::test]
+async fn test_server_token_validation_can_be_disabled() {
+    let token = CancellationToken::new();
+
+    let app = Router::new()
+        .route("/protected", get(|| async { "Success" }))
+        .layer(axum::middleware::from_fn(server::validate_token))
+        .layer(Extension(None::<Arc<String>>))
+        .layer(Extension(token));
+
+    let base_url = spawn_test_server(app).await;
+    let client = Client::new();
+
+    let res = client
+        .get(format!("{}/protected", base_url))
+        .send()
+        .await
+        .unwrap();
+
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.text().await.unwrap(), "Success");
 }
