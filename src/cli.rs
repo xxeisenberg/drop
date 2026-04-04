@@ -25,6 +25,10 @@ pub enum Commands {
         /// Enable end-to-end encryption for CLI-to-CLI transfers
         #[arg(long, default_value_t = false)]
         encrypt: bool,
+
+        /// Disable token protection on generated QR code and browser links
+        #[arg(long, default_value_t = false)]
+        no_link_token: bool,
     },
 
     /// Host a session and wait to receive a file from a joining peer
@@ -40,6 +44,10 @@ pub enum Commands {
         /// Enable end-to-end encryption for CLI-to-CLI transfers
         #[arg(long, default_value_t = false)]
         encrypt: bool,
+
+        /// Disable token protection on generated QR code and browser links
+        #[arg(long, default_value_t = false)]
+        no_link_token: bool,
     },
 
     /// Join an existing session hosted by another peer

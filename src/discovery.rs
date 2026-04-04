@@ -34,7 +34,13 @@ pub fn get_mdns_names(mode: &str) -> (String, String) {
     (instance_name, host_name)
 }
 
-pub fn spawn_mdns_advertiser(port: u16, mode: &'static str, auth_token: String, enc_key: Option<String>, token: CancellationToken) {
+pub fn spawn_mdns_advertiser(
+    port: u16,
+    mode: &'static str,
+    auth_token: Option<String>,
+    enc_key: Option<String>,
+    token: CancellationToken,
+) {
     tokio::spawn(async move {
         let result: Result<()> = async {
             let mdns = ServiceDaemon::new().context("Failed to create mDNS service daemon")?;
@@ -44,7 +50,9 @@ pub fn spawn_mdns_advertiser(port: u16, mode: &'static str, auth_token: String, 
 
             let mut properties = HashMap::new();
             properties.insert("mode".to_string(), mode.to_string());
-            properties.insert("token".to_string(), auth_token.clone());
+            if let Some(ref auth_token) = auth_token {
+                properties.insert("token".to_string(), auth_token.clone());
+            }
             if let Some(ref key) = enc_key {
                 properties.insert("enc_key".to_string(), key.clone());
             }

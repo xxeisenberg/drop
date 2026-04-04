@@ -40,10 +40,14 @@ where
 }
 
 pub async fn validate_token(
-    Extension(expected_token): Extension<Arc<String>>,
+    Extension(expected_token): Extension<Option<Arc<String>>>,
     request: Request,
     next: Next,
 ) -> AxumResponse {
+    let Some(expected_token) = expected_token else {
+        return next.run(request).await;
+    };
+
     let query = request.uri().query().unwrap_or("");
     let is_valid = query.split('&').any(|pair| {
         pair.split_once('=')
@@ -76,7 +80,7 @@ pub async fn download(
 }
 
 pub async fn get_upload(
-    Extension(auth_token): Extension<Arc<String>>,
+    Extension(auth_token): Extension<Option<Arc<String>>>,
 ) -> Result<impl IntoResponse, AppError> {
     let html = "<html lang=\"en\">
     <head>
@@ -107,10 +111,9 @@ pub async fn get_upload(
     </body>
     </html>";
 
-    let html = html.replace(
-        "action=\"/upload\"",
-        &format!("action=\"/upload?token={}\"", auth_token),
-    );
+    let action =
+        crate::utils::with_optional_token("/upload", auth_token.as_deref().map(String::as_str));
+    let html = html.replace("action=\"/upload\"", &format!("action=\"{action}\""));
 
     let response = Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
@@ -259,25 +262,25 @@ pub async fn post_upload(
                     }
                     Ok(None) => {
                         // Decrypt the last chunk
-                        if let Some(dec) = decryptor.take() {
-                            if !data_buf.is_empty() {
-                                match dec.decrypt_last(&data_buf) {
-                                    Ok(plaintext) => {
-                                        if let Err(e) = file.write_all(&plaintext).await {
-                                            bar.abandon_with_message(format!(
-                                                "[ ERROR ] : Failed to write to disk: {}",
-                                                e
-                                            ));
-                                            upload_successful = false;
-                                        }
-                                    }
-                                    Err(e) => {
+                        if let Some(dec) = decryptor.take()
+                            && !data_buf.is_empty()
+                        {
+                            match dec.decrypt_last(&data_buf) {
+                                Ok(plaintext) => {
+                                    if let Err(e) = file.write_all(&plaintext).await {
                                         bar.abandon_with_message(format!(
-                                            "[ ERROR ] : Final decryption failed: {}",
+                                            "[ ERROR ] : Failed to write to disk: {}",
                                             e
                                         ));
                                         upload_successful = false;
                                     }
+                                }
+                                Err(e) => {
+                                    bar.abandon_with_message(format!(
+                                        "[ ERROR ] : Final decryption failed: {}",
+                                        e
+                                    ));
+                                    upload_successful = false;
                                 }
                             }
                         }
@@ -443,10 +446,7 @@ async fn stream_file(
                         }
                         Err(_) => {
                             let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "encryption failed",
-                                )))
+                                .send(Err(std::io::Error::other("encryption failed")))
                                 .await;
                         }
                     }
@@ -464,10 +464,7 @@ async fn stream_file(
                         }
                         Err(_) => {
                             let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "encryption failed",
-                                )))
+                                .send(Err(std::io::Error::other("encryption failed")))
                                 .await;
                         }
                     }
@@ -482,10 +479,7 @@ async fn stream_file(
                         }
                         Err(_) => {
                             let _ = tx
-                                .send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "encryption failed",
-                                )))
+                                .send(Err(std::io::Error::other("encryption failed")))
                                 .await;
                             return;
                         }
