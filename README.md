@@ -73,11 +73,17 @@ drop join path/to/file.ext       # join a host in 'receive' mode (upload)
 | `-p`, `--port <PORT>` | Custom port (1024–65535, default: `1844`)                       |
 | `--max-size <MB>`     | Maximum upload file size in megabytes (default: no limit)       |
 | `--encrypt`           | Enable end-to-end encryption for CLI-to-CLI transfers           |
+| `--https`             | Serve browser links and discovery sessions over HTTPS           |
+| `--tls-cert <PATH>`   | PEM certificate to use with `--https`                           |
+| `--tls-key <PATH>`    | PEM private key to use with `--https`                           |
 | `--no-link-token`     | Disable token protection on generated QR code and browser links |
 
 ```bash
 drop send --encrypt ./secret.pdf
 drop receive --port 8080 --encrypt
+drop send --https ./secret.pdf
+drop receive --https
+drop send --https --tls-cert cert.pem --tls-key key.pem ./movie.mp4
 drop send ./movie.mp4 --no-link-token
 ```
 
@@ -85,7 +91,11 @@ drop send ./movie.mp4 --no-link-token
 
 When `--encrypt` is passed, `drop` uses AES-256-GCM streaming encryption. Both the sender and receiver must use the `--encrypt` flag. The encryption key is exchanged automatically over mDNS when using `join`.
 
-Browser-based uploads/downloads (via QR code or link) always use plaintext HTTP since the browser cannot participate in the key exchange.
+`--https` is separate from `--encrypt`:
+- `--https` protects browser links and CLI transport with TLS.
+- `--encrypt` keeps the existing end-to-end encryption flow for CLI-to-CLI transfers.
+
+If you enable `--https` without `--tls-cert` and `--tls-key`, `drop` generates a self-signed certificate at runtime. Browser sessions may show a trust warning unless that certificate is explicitly trusted. `drop join` still works with these self-signed hosts by pinning the advertised certificate fingerprint from mDNS.
 
 ## Network Requirements
 

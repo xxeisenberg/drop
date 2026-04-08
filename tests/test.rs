@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
 };
 use reqwest::{Client, StatusCode};
-use std::{io::Write, path::PathBuf, sync::Arc};
+use std::{io::Write, net::IpAddr, path::PathBuf, sync::Arc};
 use tempfile::NamedTempFile;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +29,10 @@ mod cli;
 #[path = "../src/discovery.rs"]
 mod discovery;
 
+#[allow(dead_code)]
+#[path = "../src/tls.rs"]
+mod tls;
+
 async fn spawn_test_server(app: Router) -> String {
     // Binding to port 0 tells the OS to assign a random available port.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -40,6 +44,41 @@ async fn spawn_test_server(app: Router) -> String {
     });
 
     address
+}
+
+async fn spawn_https_test_server(app: Router) -> (String, String, CancellationToken) {
+    let shutdown = CancellationToken::new();
+    let config = tls::HttpsConfig::load_or_generate(
+        IpAddr::from([127, 0, 0, 1]),
+        Some("drop-test.local."),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let url = format!("https://127.0.0.1:{port}");
+    let fingerprint = config.fingerprint().to_string();
+    let server_shutdown = shutdown.clone();
+
+    tokio::spawn(async move {
+        tls::serve_https(
+            addr,
+            app,
+            config.rustls_server_config().unwrap(),
+            server_shutdown,
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    (url, fingerprint, shutdown)
 }
 
 // ----------------------------------------------------------------------
@@ -229,6 +268,18 @@ fn test_utils_format_size() {
 
     // Test Gigabytes (1,000,000,000 bytes)
     assert_eq!(utils::format_size(4_120_000_000), "4.12 Gigabytes");
+}
+
+#[test]
+fn test_utils_build_base_url() {
+    assert_eq!(
+        utils::build_base_url("http", "127.0.0.1:1844", Some("/download")),
+        "http://127.0.0.1:1844/download"
+    );
+    assert_eq!(
+        utils::build_base_url("https", "127.0.0.1:1844", None),
+        "https://127.0.0.1:1844"
+    );
 }
 
 #[test]
@@ -440,9 +491,19 @@ fn test_cli_parsing() {
     // Test default port and mode
     let cli = cli::Cli::try_parse_from(&["drop", "receive"]).unwrap();
     match cli.command {
-        cli::Commands::Receive { port, encrypt, .. } => {
+        cli::Commands::Receive {
+            port,
+            encrypt,
+            https,
+            tls_cert,
+            tls_key,
+            ..
+        } => {
             assert_eq!(port, 1844);
             assert!(!encrypt);
+            assert!(!https);
+            assert!(tls_cert.is_none());
+            assert!(tls_key.is_none());
         }
         _ => panic!("Expected Receive subcommand"),
     }
@@ -461,6 +522,36 @@ fn test_cli_parsing() {
         _ => panic!("Expected Receive subcommand"),
     }
 
+    let cli = cli::Cli::try_parse_from(&["drop", "receive", "--https"]).unwrap();
+    match cli.command {
+        cli::Commands::Receive { https, .. } => assert!(https),
+        _ => panic!("Expected Receive subcommand"),
+    }
+
+    let cli = cli::Cli::try_parse_from(&[
+        "drop",
+        "receive",
+        "--https",
+        "--tls-cert",
+        "cert.pem",
+        "--tls-key",
+        "key.pem",
+    ])
+    .unwrap();
+    match cli.command {
+        cli::Commands::Receive {
+            https,
+            tls_cert,
+            tls_key,
+            ..
+        } => {
+            assert!(https);
+            assert_eq!(tls_cert.unwrap(), PathBuf::from("cert.pem"));
+            assert_eq!(tls_key.unwrap(), PathBuf::from("key.pem"));
+        }
+        _ => panic!("Expected Receive subcommand"),
+    }
+
     let cli = cli::Cli::try_parse_from(&["drop", "receive", "--no-link-token"]).unwrap();
     match cli.command {
         cli::Commands::Receive { no_link_token, .. } => assert!(no_link_token),
@@ -474,11 +565,17 @@ fn test_cli_parsing() {
             file_path,
             port,
             encrypt,
+            https,
+            tls_cert,
+            tls_key,
             no_link_token,
         } => {
             assert_eq!(file_path.to_str().unwrap(), "my_file.txt");
             assert_eq!(port, 1844);
             assert!(!encrypt);
+            assert!(!https);
+            assert!(tls_cert.is_none());
+            assert!(tls_key.is_none());
             assert!(!no_link_token);
         }
         _ => panic!("Expected Send subcommand"),
@@ -490,6 +587,17 @@ fn test_cli_parsing() {
         cli::Commands::Send { no_link_token, .. } => assert!(no_link_token),
         _ => panic!("Expected Send subcommand"),
     }
+
+    let cli = cli::Cli::try_parse_from(&["drop", "send", "my_file.txt", "--https"]).unwrap();
+    match cli.command {
+        cli::Commands::Send { https, .. } => assert!(https),
+        _ => panic!("Expected Send subcommand"),
+    }
+
+    assert!(cli::Cli::try_parse_from(&["drop", "receive", "--tls-cert", "cert.pem"]).is_err());
+    assert!(
+        cli::Cli::try_parse_from(&["drop", "send", "my_file.txt", "--tls-key", "key.pem"]).is_err()
+    );
 }
 
 // ----------------------------------------------------------------------
@@ -508,6 +616,51 @@ fn test_discovery_name_logic() {
 
     // Test extreme length (placeholder name as whoami might return anything)
     // The code handles truncation internally.
+}
+
+#[test]
+fn test_discovery_properties_include_https_metadata() {
+    let properties = discovery::build_mdns_properties(
+        "send",
+        "https",
+        Some("token"),
+        Some("enc-key"),
+        Some("fingerprint"),
+    );
+
+    assert_eq!(properties.get("mode").unwrap(), "send");
+    assert_eq!(properties.get("scheme").unwrap(), "https");
+    assert_eq!(properties.get("token").unwrap(), "token");
+    assert_eq!(properties.get("enc_key").unwrap(), "enc-key");
+    assert_eq!(properties.get("tls_fp").unwrap(), "fingerprint");
+}
+
+#[test]
+fn test_tls_fingerprint_is_stable() {
+    let config = tls::HttpsConfig::load_or_generate(
+        IpAddr::from([127, 0, 0, 1]),
+        Some("drop-test.local."),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let fingerprint = config.fingerprint().to_string();
+    assert_eq!(fingerprint.len(), 64);
+    assert_eq!(fingerprint, config.fingerprint());
+}
+
+#[test]
+fn test_tls_self_signed_cert_is_generated() {
+    let config = tls::HttpsConfig::load_or_generate(
+        IpAddr::from([127, 0, 0, 1]),
+        Some("drop-test.local."),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(config.is_generated());
 }
 
 // ----------------------------------------------------------------------
@@ -668,4 +821,90 @@ async fn test_server_cancellation_on_download() {
 
     // The handler calls token.cancel() after streaming
     assert!(token.is_cancelled());
+}
+
+#[tokio::test]
+async fn test_https_server_download_flow_with_pinned_client() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+    let file_content = b"Hello over HTTPS";
+    temp_file.write_all(file_content).unwrap();
+
+    let file_path = Arc::new(PathBuf::from(temp_file.path()));
+    let token = CancellationToken::new();
+
+    let app = Router::new()
+        .route("/download", get(server::download))
+        .layer(Extension(file_path))
+        .layer(Extension(token))
+        .layer(Extension(None as Option<Arc<[u8; 32]>>));
+
+    let (base_url, fingerprint, shutdown) = spawn_https_test_server(app).await;
+    let client = tls::build_pinned_https_client(&fingerprint).unwrap();
+
+    let res = client
+        .get(format!("{}/download", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+    assert_eq!(res.bytes().await.unwrap().as_ref(), file_content);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn test_https_server_upload_flow_with_pinned_client() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let token = CancellationToken::new();
+    let upload_dir = Arc::new(temp_dir.path().to_path_buf());
+
+    let app = Router::new()
+        .route("/upload", post(server::post_upload))
+        .layer(DefaultBodyLimit::disable())
+        .layer(Extension(token))
+        .layer(Extension(upload_dir))
+        .layer(Extension(None as Option<Arc<[u8; 32]>>));
+
+    let (base_url, fingerprint, shutdown) = spawn_https_test_server(app).await;
+    let client = tls::build_pinned_https_client(&fingerprint).unwrap();
+
+    let file_content = "secure upload";
+    let part = reqwest::multipart::Part::bytes(file_content.as_bytes().to_vec())
+        .file_name("https_upload.txt");
+    let form = reqwest::multipart::Form::new().part("uploadedFile", part);
+
+    let res = client
+        .post(format!("{}/upload", base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(res.status().is_success());
+    let saved_file_path = temp_dir.path().join("https_upload.txt");
+    assert_eq!(
+        std::fs::read_to_string(saved_file_path).unwrap(),
+        file_content
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn test_https_client_rejects_wrong_fingerprint() {
+    let token = CancellationToken::new();
+    let app = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .layer(Extension(token));
+
+    let (base_url, _fingerprint, shutdown) = spawn_https_test_server(app).await;
+    let client = tls::build_pinned_https_client(&"0".repeat(64)).unwrap();
+
+    let err = client
+        .get(format!("{}/", base_url))
+        .send()
+        .await
+        .unwrap_err();
+    let err_text = format!("{err:?}").to_ascii_lowercase();
+    assert!(err_text.contains("fingerprint") || err_text.contains("certificate"));
+    shutdown.cancel();
 }

@@ -3,6 +3,7 @@ mod client;
 mod crypto;
 mod discovery;
 mod server;
+mod tls;
 mod utils;
 
 use anyhow::{Context, Result};
@@ -30,6 +31,9 @@ async fn main() -> Result<()> {
             port,
             max_size,
             encrypt,
+            https,
+            tls_cert,
+            tls_key,
             no_link_token,
         } => {
             let auth_token: Option<Arc<String>> = (!no_link_token).then(|| {
@@ -53,6 +57,18 @@ async fn main() -> Result<()> {
 
             let local_ip = local_ip().context("Failed to obtain local IP")?;
             let ip_with_port = format!("{local_ip}:{}", port);
+            let (_, mdns_host_name) = discovery::get_mdns_names("receive");
+            let https_config = if https {
+                Some(tls::HttpsConfig::load_or_generate(
+                    local_ip,
+                    Some(&mdns_host_name),
+                    tls_cert.as_deref(),
+                    tls_key.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            let scheme = if https { "https" } else { "http" };
 
             let current_dir = std::env::current_dir().context("Failed to get current directory")?;
 
@@ -72,13 +88,20 @@ async fn main() -> Result<()> {
                 .layer(Extension(enc_key.clone()));
 
             let link = utils::with_optional_token(
-                &format!("http://{ip_with_port}"),
+                &utils::build_base_url(scheme, &ip_with_port, None),
                 auth_token.as_deref().map(String::as_str),
             );
             println!();
 
             qr2term::print_qr(&link).context("Failed to print QR code")?;
             println!("\nScan the QR or go to {}", &link);
+            if let Some(config) = https_config.as_ref()
+                && config.is_generated()
+            {
+                println!(
+                    "[ INFO ] : Using a self-signed HTTPS certificate; browsers may show a trust warning"
+                );
+            }
             if no_link_token {
                 println!("[ INFO ] : Link token disabled for browser access");
             }
@@ -86,25 +109,41 @@ async fn main() -> Result<()> {
             discovery::spawn_mdns_advertiser(
                 port,
                 "receive",
+                scheme,
                 auth_token.as_deref().cloned(),
                 enc_key_encoded.clone(),
+                https_config
+                    .as_ref()
+                    .map(|config| config.fingerprint().to_string()),
                 token,
             );
 
-            let listener = tokio::net::TcpListener::bind(&ip_with_port)
-                .await
-                .context(format!("Failed to bind to port {}", port))?;
+            if let Some(config) = https_config {
+                let addr = ip_with_port.parse()?;
+                let shutdown = shutdown_token.clone();
+                let serve = tls::serve_https(addr, app, config.rustls_server_config()?, shutdown);
+                let (serve_result, _) = tokio::join!(serve, utils::shutdown_signal(shutdown_token));
+                serve_result
+                    .context(format!("Failed to serve HTTPS server at {}", ip_with_port))?;
+            } else {
+                let listener = tokio::net::TcpListener::bind(&ip_with_port)
+                    .await
+                    .context(format!("Failed to bind to port {}", port))?;
 
-            axum::serve(listener, app)
-                .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
-                .await
-                .context(format!("Failed to serve web server at {}", ip_with_port))?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
+                    .await
+                    .context(format!("Failed to serve web server at {}", ip_with_port))?;
+            }
         }
 
         Commands::Send {
             file_path,
             port,
             encrypt,
+            https,
+            tls_cert,
+            tls_key,
             no_link_token,
         } => {
             if let Err(e) = std::fs::File::open(&file_path) {
@@ -137,6 +176,18 @@ async fn main() -> Result<()> {
 
             let local_ip = local_ip().context("Failed to obtain local IP")?;
             let ip_with_port = format!("{local_ip}:{}", port);
+            let (_, mdns_host_name) = discovery::get_mdns_names("send");
+            let https_config = if https {
+                Some(tls::HttpsConfig::load_or_generate(
+                    local_ip,
+                    Some(&mdns_host_name),
+                    tls_cert.as_deref(),
+                    tls_key.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            let scheme = if https { "https" } else { "http" };
 
             let app = Router::new()
                 .route("/download", get(server::download))
@@ -147,12 +198,19 @@ async fn main() -> Result<()> {
                 .layer(Extension(enc_key.clone()));
 
             let link = utils::with_optional_token(
-                &format!("http://{ip_with_port}/download"),
+                &utils::build_base_url(scheme, &ip_with_port, Some("/download")),
                 auth_token.as_deref().map(String::as_str),
             );
 
             qr2term::print_qr(&link).context("Failed to print QR code")?;
             println!("\nScan the QR or go to {}", &link);
+            if let Some(config) = https_config.as_ref()
+                && config.is_generated()
+            {
+                println!(
+                    "[ INFO ] : Using a self-signed HTTPS certificate; browsers may show a trust warning"
+                );
+            }
             if no_link_token {
                 println!("[ INFO ] : Link token disabled for browser access");
             }
@@ -160,18 +218,31 @@ async fn main() -> Result<()> {
             discovery::spawn_mdns_advertiser(
                 port,
                 "send",
+                scheme,
                 auth_token.as_deref().cloned(),
                 enc_key_encoded.clone(),
+                https_config
+                    .as_ref()
+                    .map(|config| config.fingerprint().to_string()),
                 token,
             );
 
-            let listener = tokio::net::TcpListener::bind(&ip_with_port)
-                .await
-                .context(format!("Failed to bind to port {}", port))?;
-            axum::serve(listener, app)
-                .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
-                .await
-                .context(format!("Failed to serve web server at {}", ip_with_port))?;
+            if let Some(config) = https_config {
+                let addr = ip_with_port.parse()?;
+                let shutdown = shutdown_token.clone();
+                let serve = tls::serve_https(addr, app, config.rustls_server_config()?, shutdown);
+                let (serve_result, _) = tokio::join!(serve, utils::shutdown_signal(shutdown_token));
+                serve_result
+                    .context(format!("Failed to serve HTTPS server at {}", ip_with_port))?;
+            } else {
+                let listener = tokio::net::TcpListener::bind(&ip_with_port)
+                    .await
+                    .context(format!("Failed to bind to port {}", port))?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(utils::shutdown_signal(shutdown_token))
+                    .await
+                    .context(format!("Failed to serve web server at {}", ip_with_port))?;
+            }
         }
 
         Commands::Join { file_path } => {
