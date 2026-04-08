@@ -113,23 +113,25 @@ impl HttpsConfig {
 }
 
 fn load_private_key(key_pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
-    let mut reader = &key_pem[..];
+    let mut reader = key_pem;
     let mut pkcs8_keys = rustls_pemfile::pkcs8_private_keys(&mut reader);
     if let Some(key) = pkcs8_keys.next() {
         return Ok(PrivateKeyDer::Pkcs8(
             key.context("Failed to parse PKCS#8 private key")?,
         ));
     }
+    drop(pkcs8_keys);
 
-    let mut reader = &key_pem[..];
+    let mut reader = key_pem;
     let mut rsa_keys = rustls_pemfile::rsa_private_keys(&mut reader);
     if let Some(key) = rsa_keys.next() {
         return Ok(PrivateKeyDer::Pkcs1(
             key.context("Failed to parse RSA private key")?,
         ));
     }
+    drop(rsa_keys);
 
-    let mut reader = &key_pem[..];
+    let mut reader = key_pem;
     let mut sec1_keys = rustls_pemfile::ec_private_keys(&mut reader);
     if let Some(key) = sec1_keys.next() {
         return Ok(PrivateKeyDer::Sec1(
