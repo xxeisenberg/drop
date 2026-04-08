@@ -26,6 +26,18 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         encrypt: bool,
 
+        /// Enable HTTPS for browser links and discovery clients
+        #[arg(long, default_value_t = false)]
+        https: bool,
+
+        /// Path to a PEM-encoded TLS certificate file
+        #[arg(long, requires = "https")]
+        tls_cert: Option<PathBuf>,
+
+        /// Path to a PEM-encoded TLS private key file
+        #[arg(long, requires = "https")]
+        tls_key: Option<PathBuf>,
+
         /// Disable token protection on generated QR code and browser links
         #[arg(long, default_value_t = false)]
         no_link_token: bool,
@@ -44,6 +56,18 @@ pub enum Commands {
         /// Enable end-to-end encryption for CLI-to-CLI transfers
         #[arg(long, default_value_t = false)]
         encrypt: bool,
+
+        /// Enable HTTPS for browser links and discovery clients
+        #[arg(long, default_value_t = false)]
+        https: bool,
+
+        /// Path to a PEM-encoded TLS certificate file
+        #[arg(long, requires = "https")]
+        tls_cert: Option<PathBuf>,
+
+        /// Path to a PEM-encoded TLS private key file
+        #[arg(long, requires = "https")]
+        tls_key: Option<PathBuf>,
 
         /// Disable token protection on generated QR code and browser links
         #[arg(long, default_value_t = false)]

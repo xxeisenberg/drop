@@ -76,6 +76,8 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
     let properties = selected_host.get_properties();
     let mode = properties.get_property_val_str("mode").unwrap_or("unknown");
     let auth_token = properties.get_property_val_str("token");
+    let scheme = properties.get_property_val_str("scheme").unwrap_or("http");
+    let tls_fingerprint = properties.get_property_val_str("tls_fp");
 
     let enc_key: Option<[u8; 32]> = properties
         .get_property_val_str("enc_key")
@@ -91,11 +93,11 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
         selected_host.get_fullname()
     );
 
-    let client = reqwest::Client::new();
+    let client = build_client_for_host(scheme, tls_fingerprint)?;
 
     if mode == "send" {
         let url = crate::utils::with_optional_token(
-            &format!("http://{}:{}/download", ip, port),
+            &crate::utils::build_base_url(scheme, &format!("{}:{}", ip, port), Some("/download")),
             auth_token,
         );
         println!("[ INFO ] : Downloading from host...");
@@ -226,7 +228,7 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
         }
     } else if mode == "receive" {
         let url = crate::utils::with_optional_token(
-            &format!("http://{}:{}/upload", ip, port),
+            &crate::utils::build_base_url(scheme, &format!("{}:{}", ip, port), Some("/upload")),
             auth_token,
         );
 
@@ -362,4 +364,21 @@ pub async fn join_network(file_path: Option<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_client_for_host(
+    scheme: &str,
+    expected_fingerprint: Option<&str>,
+) -> Result<reqwest::Client> {
+    match scheme {
+        "http" => Ok(reqwest::Client::new()),
+        "https" => {
+            let fingerprint = expected_fingerprint
+                .context("Discovered HTTPS host is missing the advertised TLS fingerprint")?;
+            crate::tls::build_pinned_https_client(fingerprint)
+        }
+        other => Err(anyhow::anyhow!(
+            "Unsupported transport scheme advertised by host: {other}"
+        )),
+    }
 }

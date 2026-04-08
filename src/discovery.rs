@@ -37,8 +37,10 @@ pub fn get_mdns_names(mode: &str) -> (String, String) {
 pub fn spawn_mdns_advertiser(
     port: u16,
     mode: &'static str,
+    scheme: &'static str,
     auth_token: Option<String>,
     enc_key: Option<String>,
+    tls_fingerprint: Option<String>,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -48,14 +50,13 @@ pub fn spawn_mdns_advertiser(
             let service_type = "_dropshare._tcp.local.";
             let (instance_name, host_name) = get_mdns_names(mode);
 
-            let mut properties = HashMap::new();
-            properties.insert("mode".to_string(), mode.to_string());
-            if let Some(ref auth_token) = auth_token {
-                properties.insert("token".to_string(), auth_token.clone());
-            }
-            if let Some(ref key) = enc_key {
-                properties.insert("enc_key".to_string(), key.clone());
-            }
+            let properties = build_mdns_properties(
+                mode,
+                scheme,
+                auth_token.as_deref(),
+                enc_key.as_deref(),
+                tls_fingerprint.as_deref(),
+            );
 
             let my_ip = local_ip()
                 .context("Failed to determine local IP address for broadcasting")?
@@ -93,4 +94,26 @@ pub fn spawn_mdns_advertiser(
             eprintln!("[ ERROR ] : mDNS advertiser stopped unexpectedly:\n{:#}", e);
         }
     });
+}
+
+pub fn build_mdns_properties(
+    mode: &str,
+    scheme: &str,
+    auth_token: Option<&str>,
+    enc_key: Option<&str>,
+    tls_fingerprint: Option<&str>,
+) -> HashMap<String, String> {
+    let mut properties = HashMap::new();
+    properties.insert("mode".to_string(), mode.to_string());
+    properties.insert("scheme".to_string(), scheme.to_string());
+    if let Some(auth_token) = auth_token {
+        properties.insert("token".to_string(), auth_token.to_string());
+    }
+    if let Some(enc_key) = enc_key {
+        properties.insert("enc_key".to_string(), enc_key.to_string());
+    }
+    if let Some(fingerprint) = tls_fingerprint {
+        properties.insert("tls_fp".to_string(), fingerprint.to_string());
+    }
+    properties
 }

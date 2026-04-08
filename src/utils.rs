@@ -46,6 +46,13 @@ pub fn with_optional_token(url: &str, token: Option<&str>) -> String {
     }
 }
 
+pub fn build_base_url(scheme: &str, host: &str, path: Option<&str>) -> String {
+    match path {
+        Some(path) => format!("{scheme}://{host}{path}"),
+        None => format!("{scheme}://{host}"),
+    }
+}
+
 pub async fn shutdown_signal(token: CancellationToken) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
